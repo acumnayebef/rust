@@ -2,212 +2,292 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject private var viewModel: LauncherViewModel
-    @State private var isConsoleExpanded = true
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    headerCard
-                    instanceCard
-                    contentSummaryRow
-                    launchButton
-                    consoleSection
+        GeometryReader { geo in
+            let isWide = geo.size.width >= 680
+
+            ZStack {
+                StarryHorizonBackdrop()
+
+                VStack(spacing: 12) {
+                    topGreetingRow
+
+                    if isWide {
+                        HStack(alignment: .center, spacing: 16) {
+                            leftMenuCards
+                                .frame(width: 210)
+                            Spacer()
+                            PixelCharacterView(
+                                skin: viewModel.activeSkin,
+                                particle: viewModel.profile.selectedParticle,
+                                scale: 1.05
+                            )
+                            Spacer()
+                            continueCard
+                                .frame(width: 220)
+                        }
+                        .frame(maxHeight: .infinity)
+                    } else {
+                        ScrollView(showsIndicators: false) {
+                            VStack(spacing: 16) {
+                                PixelCharacterView(
+                                    skin: viewModel.activeSkin,
+                                    particle: viewModel.profile.selectedParticle,
+                                    scale: 0.9
+                                )
+                                .frame(height: 230)
+
+                                LazyVGrid(
+                                    columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+                                    spacing: 10
+                                ) {
+                                    menuCard(title: "Библиотека", subtitle: "\(viewModel.instances.count) сборок", icon: "books.vertical.fill", tint: .orange) {
+                                        viewModel.navigate(to: .library)
+                                    }
+                                    menuCard(title: "Скины", subtitle: viewModel.activeSkin.name, icon: "tshirt.fill", tint: .blue) {
+                                        viewModel.navigate(to: .skins)
+                                    }
+                                    menuCard(title: "Плащи", subtitle: viewModel.profile.selectedCapeName, icon: "flag.fill", tint: .pink) {
+                                        viewModel.navigate(to: .skins)
+                                    }
+                                    menuCard(title: "Моды и сборки", subtitle: "Поиск Horizon", icon: "magnifyingglass", tint: .cyan) {
+                                        viewModel.navigate(to: .catalog)
+                                    }
+                                    menuCard(title: "Скриншоты", subtitle: nil, icon: "photo.on.rectangle.angled", tint: .teal) {
+                                        viewModel.navigate(to: .screenshots)
+                                    }
+                                    menuCard(title: "Статистика", subtitle: nil, icon: "chart.bar.fill", tint: .green) {
+                                        viewModel.navigate(to: .stats)
+                                    }
+                                }
+
+                                continueCard
+                            }
+                        }
+                    }
+
+                    bottomPlayBar
                 }
-                .padding()
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("MC Rust Launcher")
         }
     }
 
-    private var headerCard: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(
-                        LinearGradient(
-                            colors: [.orange, .red.opacity(0.8)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 56, height: 56)
-
-                Image(systemName: "cube.transparent.fill")
-                    .font(.title2)
-                    .foregroundStyle(.white)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Minecraft Rust Edition")
-                    .font(.headline)
-                HStack(spacing: 8) {
-                    Label("Core v\(viewModel.coreVersionText)", systemImage: "cpu")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("•")
-                        .foregroundStyle(.secondary)
-                    Text(viewModel.isNativeCoreLinked ? "XCFramework активен" : "Preview режим")
-                        .font(.caption)
-                        .foregroundStyle(viewModel.isNativeCoreLinked ? .green : .yellow)
-                }
+    private var topGreetingRow: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(greetingText)
+                    .font(.caption)
+                    .foregroundStyle(EternalPalette.textSecondary)
+                Text(viewModel.profile.username)
+                    .font(.title2.bold())
+                    .foregroundStyle(EternalPalette.textPrimary)
             }
 
             Spacer()
 
-            Text(viewModel.engineState.displayTitle)
-                .font(.caption.bold())
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.orange.opacity(0.2))
-                .foregroundStyle(.orange)
-                .clipShape(Capsule())
-        }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-    }
-
-    private var instanceCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Активный профиль")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if viewModel.instances.count > 1 {
-                    Menu("Сменить") {
-                        ForEach(viewModel.instances) { instance in
-                            Button(instance.name) {
-                                viewModel.selectedInstanceID = instance.id
-                                viewModel.refreshActiveInstanceContent()
-                            }
-                        }
-                    }
-                    .font(.subheadline)
-                }
-            }
-
-            if let instance = viewModel.activeInstance {
-                Text(instance.name)
-                    .font(.title3.bold())
-                HStack(spacing: 12) {
-                    Label("MC \(instance.minecraftVersion)", systemImage: "tag")
-                    Label(instance.engineBranch, systemImage: "arrow.triangle.branch")
-                    Label(viewModel.profile.username, systemImage: "person.fill")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
-    }
-
-    private var contentSummaryRow: some View {
-        let instance = viewModel.activeInstance
-        let activeMods = instance?.mods.filter(\.enabled).count ?? 0
-        let activeShaders = instance?.shaders.filter(\.enabled).count ?? 0
-        let activePacks = instance?.resourcePacks.filter(\.enabled).count ?? 0
-
-        return HStack(spacing: 10) {
-            summaryBadge(title: "Моды", count: activeMods, icon: "puzzlepiece.extension", color: .blue)
-            summaryBadge(title: "Шейдеры", count: activeShaders, icon: "sparkles", color: .purple)
-            summaryBadge(title: "Ресурспаки", count: activePacks, icon: "photo.stack", color: .teal)
-        }
-    }
-
-    private func summaryBadge(title: String, count: Int, icon: String, color: Color) -> some View {
-        VStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(color)
-            Text("\(count)")
-                .font(.title3.bold())
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private var launchButton: some View {
-        Button {
-            viewModel.prepareAndOpenViewport()
-        } label: {
             HStack(spacing: 10) {
-                Image(systemName: "play.fill")
-                Text("Запустить Rust Client")
-                    .fontWeight(.bold)
+                Button {
+                    viewModel.navigate(to: .skins)
+                } label: {
+                    Image(systemName: "star.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(EternalPalette.gold)
+                        .frame(width: 36, height: 36)
+                        .eternalCard(cornerRadius: 10)
+                }
+
+                Button {
+                    viewModel.navigate(to: .settings)
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(EternalPalette.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .eternalCard(cornerRadius: 10)
+                }
             }
-            .font(.headline)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-            .background(
-                LinearGradient(
-                    colors: [.orange, .deepOrange],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                ),
-                in: RoundedRectangle(cornerRadius: 16)
-            )
+        }
+    }
+
+    private var leftMenuCards: some View {
+        VStack(spacing: 8) {
+            menuCard(title: "Библиотека", subtitle: "\(viewModel.instances.count) сборок", icon: "books.vertical.fill", tint: .orange) {
+                viewModel.navigate(to: .library)
+            }
+            menuCard(title: "Скины", subtitle: nil, icon: "tshirt.fill", tint: .blue) {
+                viewModel.navigate(to: .skins)
+            }
+            menuCard(title: "Плащи", subtitle: nil, icon: "flag.fill", tint: .pink) {
+                viewModel.navigate(to: .skins)
+            }
+            menuCard(title: "Моды и сборки", subtitle: "Поиск", icon: "magnifyingglass", tint: .cyan) {
+                viewModel.navigate(to: .catalog)
+            }
+            menuCard(title: "Скриншоты", subtitle: nil, icon: "photo.on.rectangle.angled", tint: .teal) {
+                viewModel.navigate(to: .screenshots)
+            }
+            menuCard(title: "Статистика", subtitle: nil, icon: "chart.bar.fill", tint: .green) {
+                viewModel.navigate(to: .stats)
+            }
+        }
+    }
+
+    private func menuCard(title: String, subtitle: String?, icon: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.subheadline)
+                    .foregroundStyle(tint)
+                    .frame(width: 30, height: 30)
+                    .background(tint.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(EternalPalette.textPrimary)
+                        .lineLimit(1)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(EternalPalette.textSecondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .eternalCard(cornerRadius: 12)
         }
         .buttonStyle(.plain)
     }
 
-    private var consoleSection: some View {
-        DisclosureGroup(isExpanded: $isConsoleExpanded) {
-            VStack(alignment: .leading, spacing: 6) {
-                if viewModel.logs.isEmpty {
-                    Text("Логи ядра появятся здесь после запуска.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 8)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(viewModel.logs.suffix(60)) { entry in
-                                Text("[\(entry.level.label)] \(entry.message)")
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundStyle(color(for: entry.level))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+    private var continueCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ПРОДОЛЖИТЬ")
+                .font(.caption2.weight(.bold))
+                .tracking(1)
+                .foregroundStyle(EternalPalette.textSecondary)
+
+            ForEach(viewModel.worldShortcuts) { shortcut in
+                Button {
+                    viewModel.prepareAndOpenViewport()
+                } label: {
+                    HStack(spacing: 10) {
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(shortcut.isServer ? Color.white.opacity(0.08) : Color.green.opacity(0.24))
+                            .frame(width: 32, height: 32)
+                            .overlay {
+                                Image(systemName: shortcut.isServer ? "server.rack" : "globe.europe.africa.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(shortcut.isServer ? EternalPalette.textSecondary : .green)
+                            }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(shortcut.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(EternalPalette.textPrimary)
+                                .lineLimit(1)
+                            Text(shortcut.subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(EternalPalette.textSecondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .eternalCard(cornerRadius: 14)
+    }
+
+    private var bottomPlayBar: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 44, height: 44)
+                .overlay {
+                    Image(systemName: "cube")
+                        .font(.title3)
+                        .foregroundStyle(EternalPalette.textSecondary)
+                }
+
+            if let instance = viewModel.activeInstance {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ПОСЛЕДНЯЯ ИГРА")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(EternalPalette.textMuted)
+
+                    Menu {
+                        ForEach(viewModel.instances) { item in
+                            Button(item.name) {
+                                viewModel.selectedInstanceID = item.id
+                                viewModel.refreshActiveInstanceContent()
                             }
                         }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(instance.name)
+                                .font(.headline.bold())
+                                .foregroundStyle(EternalPalette.textPrimary)
+                            Image(systemName: "chevron.down")
+                                .font(.caption2)
+                                .foregroundStyle(EternalPalette.textSecondary)
+                        }
                     }
-                    .frame(height: 180)
+
+                    Text("\(instance.engineBranch) \(instance.minecraftVersion) • Всего в игре \(instance.playTimeMinutes) мин")
+                        .font(.caption2)
+                        .foregroundStyle(EternalPalette.textSecondary)
+                        .lineLimit(1)
                 }
 
-                HStack {
-                    Spacer()
-                    Button("Очистить консоль", role: .destructive) {
-                        viewModel.clearLogs()
-                    }
-                    .font(.caption)
+                Spacer()
+
+                Button("Открыть") {
+                    viewModel.navigate(to: .instanceDetail(instance.id))
                 }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(EternalPalette.textSecondary)
+                .padding(.horizontal, 8)
+            } else {
+                Spacer()
             }
-            .padding(.top, 8)
-        } label: {
-            Label("Консоль Rust Core (\(viewModel.logs.count))", systemImage: "terminal")
-                .font(.subheadline.weight(.semibold))
+
+            Button {
+                viewModel.prepareAndOpenViewport()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                        .font(.caption)
+                    Text("Играть")
+                        .font(.subheadline.bold())
+                }
+                .foregroundStyle(EternalPalette.roseInk)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .background(EternalPalette.rose, in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .eternalCard(cornerRadius: 16)
     }
 
-    private func color(for level: LogLevel) -> Color {
-        switch level {
-        case .debug: return .secondary
-        case .info: return .primary
-        case .warn: return .yellow
-        case .error: return .red
+    private var greetingText: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return "Доброго утра,"
+        case 12..<18: return "Добрый день,"
+        case 18..<23: return "Добрый вечер,"
+        default: return "Доброй ночи,"
         }
     }
-}
-
-private extension Color {
-    static let deepOrange = Color(red: 0.90, green: 0.30, blue: 0.10)
 }

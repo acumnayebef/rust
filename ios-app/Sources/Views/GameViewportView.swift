@@ -39,17 +39,18 @@ struct GameViewportView: View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(viewModel.engineState == .running ? Color.green : Color.orange)
+                    .fill(viewModel.engineState == .running ? Color.green : EternalPalette.rose)
                     .frame(width: 8, height: 8)
-                Text(viewModel.activeInstance?.name ?? "Rust Client")
+                Text(viewModel.activeInstance?.name ?? "Horizon Client")
                     .font(.caption.bold())
-                Text("• \(viewModel.engineState.displayTitle)")
+                    .foregroundStyle(EternalPalette.textPrimary)
+                Text("• \(viewModel.importedGameFiles.fileCount) файлов игры")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(EternalPalette.textSecondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
+            .eternalCard(cornerRadius: 20)
 
             Spacer()
 
@@ -59,8 +60,9 @@ struct GameViewportView: View {
                 }
             } label: {
                 Image(systemName: "terminal")
+                    .foregroundStyle(EternalPalette.textPrimary)
                     .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .eternalCard(cornerRadius: 20)
             }
 
             Button {
@@ -80,7 +82,7 @@ struct GameViewportView: View {
     private var miniConsoleOverlay: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 3) {
-                ForEach(viewModel.logs.suffix(25)) { entry in
+                ForEach(viewModel.logs.suffix(30)) { entry in
                     Text("[\(entry.level.label)] \(entry.message)")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(entry.level == .error ? .red : .white)
@@ -89,8 +91,8 @@ struct GameViewportView: View {
             }
             .padding(10)
         }
-        .frame(maxHeight: 170)
-        .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxHeight: 200)
+        .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var bottomTouchControls: some View {
@@ -130,7 +132,7 @@ struct GameViewportView: View {
             Image(systemName: systemImage)
                 .font(.headline)
                 .frame(width: 44, height: 44)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .eternalCard(cornerRadius: 12)
         }
         .foregroundStyle(.white)
     }
@@ -143,7 +145,7 @@ struct GameViewportView: View {
                 .font(.caption.bold())
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .background(.ultraThinMaterial, in: Capsule())
+                .eternalCard(cornerRadius: 20)
         }
         .foregroundStyle(.white)
     }
@@ -188,7 +190,7 @@ final class MetalLayerHostView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = UIColor(red: 0.06, green: 0.08, blue: 0.11, alpha: 1.0)
+        backgroundColor = UIColor(red: 0.08, green: 0.04, blue: 0.06, alpha: 1.0)
         isMultipleTouchEnabled = true
     }
 

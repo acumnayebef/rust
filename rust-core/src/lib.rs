@@ -1,21 +1,19 @@
 pub mod config;
 pub mod content;
-pub mod renderer;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
 
+use libloading::Library;
 use serde::Serialize;
 
 use crate::config::LaunchConfig;
-use crate::content::{inspect_manifest, ContentManifestSummary};
-use crate::renderer::{CameraState, InputState, VoxelRenderer};
+use crate::content::{inspect_game_files, inspect_manifest, ContentManifestSummary};
 
-const CORE_VERSION_CSTR: &[u8] = b"0.1.0\0";
+const CORE_VERSION_CSTR: &[u8] = b"0.2.0\0";
 
 /// Mirrors `MCRustEngineStatus` in `include/mc_rust_core.h`.
 #[repr(i32)]
@@ -40,6 +38,11 @@ pub enum LogLevel {
 }
 
 pub type LogCallbackFn = unsafe extern "C" fn(level: i32, message: *const c_char, user_data: *mut c_void);
+
+type ImportedGameMainFn = unsafe extern "C" fn(*const c_char, *mut c_void) -> i32;
+type ImportedGameStopFn = unsafe extern "C" fn();
+type ImportedGameResizeFn = unsafe extern "C" fn(u32, u32, f32);
+type ImportedGameTouchFn = unsafe extern "C" fn(i32, f32, f32, f32, f32);
 
 /// Thread-safe bridge for emitting logs back to the SwiftUI launcher console.
 #[derive(Clone, Copy)]
@@ -82,10 +85,7 @@ impl Logger {
     }
 }
 
-/// Integration trait for your custom Minecraft Rust Edition engine.
-///
-/// Replace or wrap `CustomRustClientRuntime` with your real Rust game client
-/// (for example initializing a `wgpu` Metal surface from `metal_layer_ptr`).
+/// Integration trait for launching imported Minecraft Rust Edition / Horizon builds.
 pub trait EngineRuntime: Send + Sync {
     fn start(
         &mut self,
@@ -102,41 +102,40 @@ pub trait EngineRuntime: Send + Sync {
     fn on_touch(&mut self, action: i32, x: f32, y: f32, dx: f32, dy: f32);
 }
 
-/// Default reference runtime that binds `wgpu` directly to iOS `CAMetalLayer`,
-/// runs a 3D procedural voxel Metal render loop, and logs loaded mods/shaders/resource packs.
-pub struct CustomRustClientRuntime {
+/// Launches the user-imported Rust game client from `config.game_files_root`.
+pub struct ImportedGameRuntime {
     logger: Option<Logger>,
     viewport_width: u32,
     viewport_height: u32,
     content_scale: f32,
-    stop_flag: Arc<AtomicBool>,
-    render_thread: Option<JoinHandle<()>>,
-    pending_resize: Arc<Mutex<Option<(u32, u32)>>>,
-    input_state: Arc<Mutex<InputState>>,
+    loaded_library: Option<Library>,
+    stop_hook: Option<ImportedGameStopFn>,
+    resize_hook: Option<ImportedGameResizeFn>,
+    touch_hook: Option<ImportedGameTouchFn>,
 }
 
-impl CustomRustClientRuntime {
+impl ImportedGameRuntime {
     pub fn new() -> Self {
         Self {
             logger: None,
-            viewport_width: 1280,
-            viewport_height: 720,
+            viewport_width: 0,
+            viewport_height: 0,
             content_scale: 1.0,
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            render_thread: None,
-            pending_resize: Arc::new(Mutex::new(None)),
-            input_state: Arc::new(Mutex::new(InputState::default())),
+            loaded_library: None,
+            stop_hook: None,
+            resize_hook: None,
+            touch_hook: None,
         }
     }
 }
 
-impl Default for CustomRustClientRuntime {
+impl Default for ImportedGameRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl EngineRuntime for CustomRustClientRuntime {
+impl EngineRuntime for ImportedGameRuntime {
     fn start(
         &mut self,
         config: LaunchConfig,
@@ -145,22 +144,28 @@ impl EngineRuntime for CustomRustClientRuntime {
         logger: &Logger,
     ) -> Result<(), String> {
         self.logger = Some(*logger);
-        self.stop_flag.store(false, Ordering::SeqCst);
-
         logger.info(format!(
-            "Booting custom Minecraft Rust Edition runtime for instance '{}' (MC {})",
-            config.instance_name, config.minecraft_version
-        ));
-        logger.info(format!(
-            "Player '{}' | Render distance: {} chunks | Max FPS: {} | MetalFX: {}",
-            config.account.username,
-            config.graphics.render_distance,
-            config.graphics.max_fps,
-            config.graphics.metalfx_upscaling
+            "Подготовка запуска '{}' (Horizon {}) для игрока '{}'",
+            config.instance_name, config.minecraft_version, config.account.username
         ));
 
+        let game_summary = inspect_game_files(Path::new(&config.game_files_root));
+        if game_summary.file_count == 0 {
+            return Err(
+                "Файлы игры не найдены. Импортируйте файлы игры в Настройках лаунчера."
+                    .to_string(),
+            );
+        }
+
         logger.info(format!(
-            "Content pipeline ready: {} mods, {} shaders, {} resource packs",
+            "Импортированные файлы игры: {} файлов ({:.2} МБ) в {}",
+            game_summary.file_count,
+            (game_summary.total_bytes as f64) / (1024.0 * 1024.0),
+            config.game_files_root
+        ));
+
+        logger.info(format!(
+            "Активный контент Horizon: {} модов, {} шейдеров, {} ресурспаков",
             manifest.mods.len(),
             manifest.shaders.len(),
             manifest.resource_packs.len()
@@ -182,89 +187,85 @@ impl EngineRuntime for CustomRustClientRuntime {
             ));
         }
 
-        if metal_layer_ptr == 0 {
-            logger.warn("CAMetalLayer pointer is null; running in headless bridge diagnostic mode");
-            return Ok(());
+        if let Some(dylib_path) = game_summary.dylib_entrypoint {
+            logger.info(format!(
+                "Обнаружен нативный модуль игры: {}",
+                dylib_path.display()
+            ));
+            let config_json = serde_json::to_string(&config)
+                .map_err(|e| format!("Failed to serialize launch config: {e}"))?;
+            let config_cstr = CString::new(config_json)
+                .map_err(|e| format!("Launch config contains interior NUL: {e}"))?;
+
+            // SAFETY: Loading user-imported dynamic library inside iOS app sandbox.
+            unsafe {
+                let lib = Library::new(&dylib_path).map_err(|e| {
+                    format!(
+                        "Не удалось загрузить библиотеку {}: {e}",
+                        dylib_path.display()
+                    )
+                })?;
+
+                let entry: Option<ImportedGameMainFn> = lib
+                    .get::<ImportedGameMainFn>(b"mc_rust_game_main\0")
+                    .or_else(|_| lib.get::<ImportedGameMainFn>(b"horizon_ios_main\0"))
+                    .ok()
+                    .map(|sym| *sym);
+
+                self.stop_hook = lib
+                    .get::<ImportedGameStopFn>(b"mc_rust_game_stop\0")
+                    .ok()
+                    .map(|sym| *sym);
+                self.resize_hook = lib
+                    .get::<ImportedGameResizeFn>(b"mc_rust_game_resize\0")
+                    .ok()
+                    .map(|sym| *sym);
+                self.touch_hook = lib
+                    .get::<ImportedGameTouchFn>(b"mc_rust_game_touch\0")
+                    .ok()
+                    .map(|sym| *sym);
+
+                if let Some(main_fn) = entry {
+                    logger.info("Запуск точки входа импортированного Rust-клиента...");
+                    let rc = main_fn(config_cstr.as_ptr(), metal_layer_ptr as *mut c_void);
+                    if rc != 0 {
+                        return Err(format!("Точка входа игры вернула код ошибки {rc}"));
+                    }
+                } else {
+                    logger.warn("Библиотека загружена, но символ mc_rust_game_main / horizon_ios_main не найден.");
+                }
+
+                self.loaded_library = Some(lib);
+            }
+        } else {
+            if metal_layer_ptr != 0 {
+                logger.info(format!(
+                    "Metal-слой 0x{metal_layer_ptr:x} привязан и ожидает запуск нативного клиента."
+                ));
+            }
+            if !game_summary.archive_files.is_empty() {
+                logger.info(format!(
+                    "Обнаружены импортированные пакеты/ресурсы игры: {}",
+                    game_summary.archive_files.join(", ")
+                ));
+            }
+            logger.warn(
+                "В импортированных файлах не найден .dylib с точкой входа mc_rust_game_main / horizon_ios_main — файлы проиндексированы, клиент готов к подключению.",
+            );
         }
 
-        logger.info(format!(
-            "Initializing wgpu Metal renderer for CAMetalLayer 0x{metal_layer_ptr:x}..."
-        ));
-
-        let init_w = self.viewport_width.max(1);
-        let init_h = self.viewport_height.max(1);
-        let shader_enabled = !manifest.shaders.is_empty();
-
-        // SAFETY: SwiftUI's `GameViewportView` keeps `CAMetalLayer` alive until `stop()` joins
-        // the render thread and drops `VoxelRenderer`.
-        let mut renderer = unsafe {
-            VoxelRenderer::new(
-                metal_layer_ptr,
-                init_w,
-                init_h,
-                config.graphics.vsync,
-                shader_enabled,
-                &config.graphics.shader_quality,
-            )?
-        };
-        logger.info("wgpu Metal 3D voxel renderer initialized successfully");
-
-        let stop_flag = Arc::clone(&self.stop_flag);
-        let pending_resize = Arc::clone(&self.pending_resize);
-        let input_state = Arc::clone(&self.input_state);
-        let thread_logger = *logger;
-        let max_fps = config.graphics.max_fps.clamp(15, 240);
-        let frame_budget = Duration::from_secs_f64(1.0 / (max_fps as f64));
-
-        let handle = thread::Builder::new()
-            .name("mc-rust-metal-render".to_string())
-            .spawn(move || {
-                let mut camera = CameraState::default();
-                let start_time = Instant::now();
-                let mut last_frame = start_time;
-
-                while !stop_flag.load(Ordering::SeqCst) {
-                    let now = Instant::now();
-                    let dt = (now - last_frame).as_secs_f32().clamp(0.001, 0.05);
-                    last_frame = now;
-
-                    if let Ok(mut resize_guard) = pending_resize.lock() {
-                        if let Some((w, h)) = resize_guard.take() {
-                            renderer.resize(w, h);
-                        }
-                    }
-
-                    if let Ok(mut input_guard) = input_state.lock() {
-                        camera.update(dt, &mut input_guard);
-                    }
-
-                    let elapsed = (now - start_time).as_secs_f32();
-                    if let Err(err) = renderer.render(&camera, elapsed) {
-                        thread_logger.error(format!("Render frame error: {err}"));
-                        break;
-                    }
-
-                    let frame_elapsed = now.elapsed();
-                    if frame_elapsed < frame_budget {
-                        thread::sleep(frame_budget - frame_elapsed);
-                    }
-                }
-            })
-            .map_err(|e| format!("Failed to spawn render thread: {e}"))?;
-
-        self.render_thread = Some(handle);
         Ok(())
     }
 
     fn stop(&mut self, logger: &Logger) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.render_thread.take() {
-            let _ = handle.join();
+        if let Some(stop_fn) = self.stop_hook.take() {
+            // SAFETY: Hook belongs to `self.loaded_library` which is still alive here.
+            unsafe { stop_fn() };
         }
-        logger.info(format!(
-            "Stopped custom Minecraft Rust Edition runtime (last viewport={}x{} @ {}x)",
-            self.viewport_width, self.viewport_height, self.content_scale
-        ));
+        self.resize_hook = None;
+        self.touch_hook = None;
+        self.loaded_library = None;
+        logger.info("Сессия импортированной игры завершена.");
         self.logger = None;
     }
 
@@ -272,43 +273,16 @@ impl EngineRuntime for CustomRustClientRuntime {
         self.viewport_width = width;
         self.viewport_height = height;
         self.content_scale = scale;
-        if let Ok(mut guard) = self.pending_resize.lock() {
-            *guard = Some((width.max(1), height.max(1)));
-        }
-        if let Some(logger) = &self.logger {
-            logger.log(
-                LogLevel::Debug,
-                format!("Metal drawable resized to {width}x{height} (scale={scale:.2})"),
-            );
+        if let Some(resize_fn) = self.resize_hook {
+            // SAFETY: Hook belongs to `self.loaded_library`.
+            unsafe { resize_fn(width, height, scale) };
         }
     }
 
     fn on_touch(&mut self, action: i32, x: f32, y: f32, dx: f32, dy: f32) {
-        if let Ok(mut guard) = self.input_state.lock() {
-            match action {
-                0 => {
-                    guard.look_dx += dx;
-                    guard.look_dy += dy;
-                }
-                3 => {
-                    guard.move_x = x.clamp(-1.0, 1.0);
-                    guard.move_y = y.clamp(-1.0, 1.0);
-                }
-                1 => {
-                    if x > 0.85 && y > 0.5 {
-                        guard.jump_requested = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if action == 1 || action == 2 {
-            if let Some(logger) = &self.logger {
-                logger.log(
-                    LogLevel::Debug,
-                    format!("Input event action={action} pos=({x:.2}, {y:.2}) delta=({dx:.2}, {dy:.2})"),
-                );
-            }
+        if let Some(touch_fn) = self.touch_hook {
+            // SAFETY: Hook belongs to `self.loaded_library`.
+            unsafe { touch_fn(action, x, y, dx, dy) };
         }
     }
 }
@@ -408,7 +382,7 @@ pub unsafe extern "C" fn mc_rust_engine_validate_config(config_json: *const c_ch
     })
 }
 
-/// Starts the Rust client runtime using `config_json` and an optional `CAMetalLayer` pointer.
+/// Starts the imported Rust client runtime using `config_json` and a `CAMetalLayer` pointer.
 #[no_mangle]
 pub unsafe extern "C" fn mc_rust_engine_start(
     config_json: *const c_char,
@@ -458,7 +432,7 @@ pub unsafe extern "C" fn mc_rust_engine_start(
 
         ENGINE_STATUS.store(EngineStatus::Loading as i32, Ordering::SeqCst);
         let manifest = inspect_manifest(&config);
-        let mut runtime: Box<dyn EngineRuntime> = Box::new(CustomRustClientRuntime::new());
+        let mut runtime: Box<dyn EngineRuntime> = Box::new(ImportedGameRuntime::new());
 
         if let Err(err) = runtime.start(config, manifest, metal_layer as usize, &logger) {
             logger.error(format!("Engine failed to start: {err}"));

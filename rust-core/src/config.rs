@@ -11,6 +11,8 @@ pub struct LaunchConfig {
     pub instance_name: String,
     pub minecraft_version: String,
     pub instance_root: String,
+    #[serde(default)]
+    pub game_files_root: String,
     pub account: AccountConfig,
     pub graphics: GraphicsConfig,
     #[serde(default)]
@@ -113,6 +115,23 @@ impl LaunchConfig {
                 "instanceRoot does not exist on disk: {}",
                 self.instance_root
             ));
+        }
+
+        let game_files_path = Path::new(&self.game_files_root);
+        if self.game_files_root.trim().is_empty() {
+            errors.push("Файлы игры не импортированы. Откройте Настройки -> Импортировать файлы игры.".to_string());
+        } else if !game_files_path.exists() {
+            errors.push(format!(
+                "Директория файлов игры не найдена: {}",
+                self.game_files_root
+            ));
+        } else if game_files_path.is_dir() {
+            let has_entries = std::fs::read_dir(game_files_path)
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false);
+            if !has_entries {
+                errors.push("Файлы игры не импортированы (папка game-files пуста).".to_string());
+            }
         }
 
         let active_mods = validate_content_list("mod", &self.mods, &mut errors, &mut warnings);

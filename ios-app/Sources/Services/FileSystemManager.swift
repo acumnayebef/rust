@@ -39,6 +39,22 @@ final class FileSystemManager {
         launcherRootURL.appendingPathComponent("instances", isDirectory: true)
     }
 
+    var gameFilesDirectoryURL: URL {
+        launcherRootURL.appendingPathComponent("game-files", isDirectory: true)
+    }
+
+    var skinsDirectoryURL: URL {
+        launcherRootURL.appendingPathComponent("skins", isDirectory: true)
+    }
+
+    var screenshotsDirectoryURL: URL {
+        launcherRootURL.appendingPathComponent("screenshots", isDirectory: true)
+    }
+
+    var cachedHorizonIndexURL: URL {
+        launcherRootURL.appendingPathComponent("horizon-index-cache.json")
+    }
+
     var instancesMetadataURL: URL {
         launcherRootURL.appendingPathComponent("instances.json")
     }
@@ -54,6 +70,9 @@ final class FileSystemManager {
     func ensureBaseDirectories() throws {
         try fileManager.createDirectory(at: launcherRootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: instancesDirectoryURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: gameFilesDirectoryURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: skinsDirectoryURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: screenshotsDirectoryURL, withIntermediateDirectories: true)
     }
 
     func instanceRootURL(for instanceId: String) -> URL {
@@ -78,6 +97,11 @@ final class FileSystemManager {
         if fileManager.fileExists(atPath: root.path) {
             try fileManager.removeItem(at: root)
         }
+    }
+
+    func saveCachedHorizonIndex(_ data: Data) throws {
+        try ensureBaseDirectories()
+        try data.write(to: cachedHorizonIndexURL, options: .atomic)
     }
 
     func loadInstances() -> [GameInstance] {
@@ -122,7 +146,78 @@ final class FileSystemManager {
         try data.write(to: profileURL, options: .atomic)
     }
 
-    /// Scans the instance's folder for `kind` and merges discovered files with existing metadata.
+    // MARK: - Game Files Import & Inspection
+
+    func importGameFiles(from sourceURLs: [URL]) throws -> ImportedGameFilesInfo {
+        try ensureBaseDirectories()
+        for sourceURL in sourceURLs {
+            let accessed = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessed {
+                    sourceURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let destURL = gameFilesDirectoryURL.appendingPathComponent(sourceURL.lastPathComponent)
+            if fileManager.fileExists(atPath: destURL.path) {
+                try fileManager.removeItem(at: destURL)
+            }
+            try fileManager.copyItem(at: sourceURL, to: destURL)
+        }
+        return inspectGameFiles()
+    }
+
+    func inspectGameFiles() -> ImportedGameFilesInfo {
+        try? ensureBaseDirectories()
+        var info = ImportedGameFilesInfo(rootPath: gameFilesDirectoryURL.path)
+
+        guard let enumerator = fileManager.enumerator(
+            at: gameFilesDirectoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return info
+        }
+
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values?.isRegularFile == true else { continue }
+            info.fileCount += 1
+            info.totalBytes += Int64(values?.fileSize ?? 0)
+
+            let ext = fileURL.pathExtension.lowercased()
+            if info.detectedEntrypoint == nil && (ext == "dylib" || ext == "wasm" || ext == "ipa" || ext == "zip") {
+                info.detectedEntrypoint = fileURL.lastPathComponent
+            }
+        }
+        return info
+    }
+
+    func clearGameFiles() throws {
+        if fileManager.fileExists(atPath: gameFilesDirectoryURL.path) {
+            try fileManager.removeItem(at: gameFilesDirectoryURL)
+        }
+        try fileManager.createDirectory(at: gameFilesDirectoryURL, withIntermediateDirectories: true)
+    }
+
+    func importSkinFile(from sourceURL: URL) throws -> URL {
+        try ensureBaseDirectories()
+        let accessed = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessed {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        let destURL = skinsDirectoryURL.appendingPathComponent(sourceURL.lastPathComponent)
+        if fileManager.fileExists(atPath: destURL.path) {
+            try fileManager.removeItem(at: destURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destURL)
+        return destURL
+    }
+
+    // MARK: - Instance Content Management
+
     func syncContent(for instance: inout GameInstance, kind: ContentKind) throws {
         try createInstanceDirectories(for: instance.id)
         let folder = contentFolderURL(for: instance.id, kind: kind)
@@ -159,7 +254,8 @@ final class FileSystemManager {
                         path: url.path,
                         enabled: true,
                         order: existing.count + index,
-                        sizeBytes: sizeBytes
+                        sizeBytes: sizeBytes,
+                        horizonProjectID: nil
                     )
                 )
             }
@@ -207,5 +303,24 @@ final class FileSystemManager {
         if fileManager.fileExists(atPath: url.path) {
             try fileManager.removeItem(at: url)
         }
+    }
+
+    func instanceSizeBytes(for instanceId: String) -> Int64 {
+        let root = instanceRootURL(for: instanceId)
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            if vals?.isRegularFile == true {
+                total += Int64(vals?.fileSize ?? 0)
+            }
+        }
+        return total
     }
 }

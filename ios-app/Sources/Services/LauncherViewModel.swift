@@ -12,15 +12,51 @@ final class LauncherViewModel: ObservableObject {
     @Published var logs: [LogEntry] = []
     @Published var isShowingViewport = false
     @Published var lastErrorMessage: String?
+    @Published var showMissingGameFilesAlert = false
+
+    @Published var navigationStack: [AppRoute] = [.home]
+    @Published var horizonProjects: [HorizonProject] = []
+    @Published var isLoadingCatalog = false
+    @Published var installingProjectIDs: Set<String> = []
+    @Published var importedGameFiles = ImportedGameFilesInfo()
+    @Published var worldShortcuts: [WorldShortcut] = [
+        WorldShortcut(title: "Новый мир", subtitle: "моя сборка", isServer: false),
+        WorldShortcut(title: "Horizon Official", subtitle: "0/20 онлайн • моя сборка", isServer: true)
+    ]
 
     private let fs = FileSystemManager.shared
     private let bridge = RustBridge.shared
+    private let catalog = HorizonCatalogService.shared
     private let maxLogEntries = 400
 
     init() {
         self.graphicsSettings = fs.loadGraphicsSettings()
         self.profile = fs.loadProfile()
         loadOrCreateDefaultInstances()
+        refreshImportedGameFiles()
+        loadHorizonCatalog()
+    }
+
+    var currentRoute: AppRoute {
+        navigationStack.last ?? .home
+    }
+
+    var canGoBack: Bool {
+        navigationStack.count > 1
+    }
+
+    func navigate(to route: AppRoute) {
+        if currentRoute == route { return }
+        if route == .home {
+            navigationStack = [.home]
+        } else {
+            navigationStack.append(route)
+        }
+    }
+
+    func goBack() {
+        guard navigationStack.count > 1 else { return }
+        navigationStack.removeLast()
     }
 
     var activeInstance: GameInstance? {
@@ -38,12 +74,24 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
+    func instance(for id: String) -> GameInstance? {
+        instances.first(where: { $0.id == id })
+    }
+
+    var activeSkin: SkinPreset {
+        SkinPreset.defaults.first(where: { $0.id == profile.selectedSkinID }) ?? SkinPreset.defaults[0]
+    }
+
     var coreVersionText: String {
         bridge.coreVersion
     }
 
     var isNativeCoreLinked: Bool {
         bridge.isNativeCoreLinked
+    }
+
+    var totalPlayTimeMinutes: Int {
+        instances.reduce(0) { $0 + $1.playTimeMinutes }
     }
 
     func loadOrCreateDefaultInstances() {
@@ -55,21 +103,43 @@ final class LauncherViewModel: ObservableObject {
 
         var loaded = fs.loadInstances()
         if loaded.isEmpty {
-            let defaultId = "default-rust-1-21"
-            try? fs.createInstanceDirectories(for: defaultId)
-            let defaultInstance = GameInstance(
-                id: defaultId,
-                name: "Rust Client Default",
-                minecraftVersion: "1.21.4",
-                engineBranch: "custom-rust-main",
-                customFlags: ["--metal-renderer"],
-                createdAt: Date(),
-                lastPlayedAt: nil,
-                mods: [],
-                shaders: [],
-                resourcePacks: []
-            )
-            loaded = [defaultInstance]
+            let mainId = "horizon-my-pack"
+            let rustId = "rust-horizon"
+            try? fs.createInstanceDirectories(for: mainId)
+            try? fs.createInstanceDirectories(for: rustId)
+
+            loaded = [
+                GameInstance(
+                    id: mainId,
+                    name: "моя сборка",
+                    minecraftVersion: "26.3",
+                    engineBranch: "Horizon",
+                    customFlags: ["--metal-renderer"],
+                    createdAt: Date().addingTimeInterval(-86400 * 3),
+                    lastPlayedAt: Date().addingTimeInterval(-86400 * 3),
+                    playTimeMinutes: 13,
+                    badgeText: nil,
+                    folderTag: nil,
+                    mods: [],
+                    shaders: [],
+                    resourcePacks: []
+                ),
+                GameInstance(
+                    id: rustId,
+                    name: "Rust",
+                    minecraftVersion: "Horizon",
+                    engineBranch: "Rust",
+                    customFlags: ["--metal-renderer"],
+                    createdAt: Date().addingTimeInterval(-86400 * 5),
+                    lastPlayedAt: Date().addingTimeInterval(-86400 * 3),
+                    playTimeMinutes: 120,
+                    badgeText: nil,
+                    folderTag: nil,
+                    mods: [],
+                    shaders: [],
+                    resourcePacks: []
+                )
+            ]
         }
 
         for index in loaded.indices {
@@ -79,7 +149,104 @@ final class LauncherViewModel: ObservableObject {
         instances = loaded
         selectedInstanceID = loaded.first?.id
         persistInstances()
-        appendLog(.info, "Лаунчер инициализирован (Rust Core v\(bridge.coreVersion)).")
+        appendLog(.info, "Eternal Launcher инициализирован (Rust Core v\(bridge.coreVersion)).")
+    }
+
+    func loadHorizonCatalog() {
+        let projects = catalog.loadBundledOrCached()
+        horizonProjects = projects
+        appendLog(.info, "Каталог Horizon загружен: \(projects.count) проектов.")
+    }
+
+    func refreshHorizonCatalog() async {
+        isLoadingCatalog = true
+        defer { isLoadingCatalog = false }
+        do {
+            let updated = try await catalog.refreshFromRemote()
+            horizonProjects = updated
+            appendLog(.info, "Каталог Horizon обновлён онлайн: \(updated.count) проектов.")
+        } catch {
+            lastErrorMessage = "Не удалось обновить каталог онлайн: \(error.localizedDescription)"
+        }
+    }
+
+    func isHorizonProjectInstalled(_ project: HorizonProject, in instance: GameInstance) -> Bool {
+        let expectedFile = project.latestVersion?.file.name
+        let list = instance.items(for: project.targetContentKind)
+        return list.contains { item in
+            item.horizonProjectID == project.id || (expectedFile != nil && item.fileName == expectedFile)
+        }
+    }
+
+    func installHorizonProject(_ project: HorizonProject, into instanceID: String? = nil) async {
+        let targetID = instanceID ?? activeInstance?.id
+        guard let targetID,
+              var targetInstance = instances.first(where: { $0.id == targetID }) else {
+            return
+        }
+
+        installingProjectIDs.insert(project.id)
+        defer { installingProjectIDs.remove(project.id) }
+
+        do {
+            appendLog(.info, "Загрузка '\(project.name)' из каталога Horizon...")
+            let downloaded = try await catalog.downloadLatest(for: project)
+            _ = try fs.saveDownloadedData(
+                downloaded.data,
+                fileName: downloaded.fileName,
+                instanceId: targetInstance.id,
+                kind: downloaded.targetKind
+            )
+            syncAllContent(for: &targetInstance)
+            var list = targetInstance.items(for: downloaded.targetKind)
+            if let idx = list.firstIndex(where: { $0.fileName == downloaded.fileName }) {
+                list[idx].name = project.name
+                list[idx].horizonProjectID = project.id
+                targetInstance.setItems(list, for: downloaded.targetKind)
+            }
+            updateInstance(targetInstance)
+            appendLog(.info, "Установлено '\(project.name)' (\(downloaded.fileName)).")
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            appendLog(.error, "Ошибка установки '\(project.name)': \(error.localizedDescription)")
+        }
+    }
+
+    func refreshImportedGameFiles() {
+        importedGameFiles = fs.inspectGameFiles()
+    }
+
+    func importGameFiles(urls: [URL]) {
+        do {
+            importedGameFiles = try fs.importGameFiles(from: urls)
+            appendLog(
+                .info,
+                "Импортировано файлов игры: \(importedGameFiles.fileCount) (\(importedGameFiles.formattedSize))."
+            )
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            appendLog(.error, "Ошибка импорта файлов игры: \(error.localizedDescription)")
+        }
+    }
+
+    func clearGameFiles() {
+        do {
+            try fs.clearGameFiles()
+            refreshImportedGameFiles()
+            appendLog(.info, "Импортированные файлы игры очищены.")
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
+    }
+
+    func importCustomSkin(urls: [URL]) {
+        guard let first = urls.first else { return }
+        do {
+            let dest = try fs.importSkinFile(from: first)
+            appendLog(.info, "Импортирован скин: \(dest.lastPathComponent)")
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
     }
 
     func refreshActiveInstanceContent() {
@@ -94,7 +261,14 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    func createInstance(name: String, minecraftVersion: String, engineBranch: String, flags: [String]) {
+    private func updateInstance(_ updated: GameInstance) {
+        if let idx = instances.firstIndex(where: { $0.id == updated.id }) {
+            instances[idx] = updated
+            persistInstances()
+        }
+    }
+
+    func createInstance(name: String, minecraftVersion: String, engineBranch: String, flags: [String], folderTag: String? = nil) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
 
@@ -105,14 +279,17 @@ final class LauncherViewModel: ObservableObject {
                 id: id,
                 name: trimmedName,
                 minecraftVersion: minecraftVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "1.21.4"
+                    ? "26.3"
                     : minecraftVersion,
                 engineBranch: engineBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "custom-rust-main"
+                    ? "Horizon"
                     : engineBranch,
                 customFlags: flags,
                 createdAt: Date(),
                 lastPlayedAt: nil,
+                playTimeMinutes: 0,
+                badgeText: nil,
+                folderTag: folderTag,
                 mods: [],
                 shaders: [],
                 resourcePacks: []
@@ -120,16 +297,16 @@ final class LauncherViewModel: ObservableObject {
             instances.append(instance)
             selectedInstanceID = instance.id
             persistInstances()
-            appendLog(.info, "Создан профиль '\(instance.name)' (MC \(instance.minecraftVersion)).")
+            appendLog(.info, "Создана сборка '\(instance.name)' (\(instance.engineBranch) \(instance.minecraftVersion)).")
         } catch {
             lastErrorMessage = error.localizedDescription
-            appendLog(.error, "Не удалось создать профиль: \(error.localizedDescription)")
+            appendLog(.error, "Не удалось создать сборку: \(error.localizedDescription)")
         }
     }
 
     func deleteInstance(_ instance: GameInstance) {
         guard instances.count > 1 else {
-            lastErrorMessage = "Нельзя удалить единственный профиль."
+            lastErrorMessage = "Нельзя удалить единственную сборку."
             return
         }
         try? fs.deleteInstanceDirectory(for: instance.id)
@@ -140,29 +317,32 @@ final class LauncherViewModel: ObservableObject {
         persistInstances()
     }
 
-    func toggleContentItem(_ item: ContentItem) {
-        guard var current = activeInstance else { return }
-        var list = current.items(for: item.kind)
+    func toggleContentItem(_ item: ContentItem, in instanceID: String? = nil) {
+        let id = instanceID ?? activeInstance?.id
+        guard let id, var target = instance(for: id) else { return }
+        var list = target.items(for: item.kind)
         guard let idx = list.firstIndex(where: { $0.id == item.id }) else { return }
         list[idx].enabled.toggle()
-        current.setItems(list, for: item.kind)
-        activeInstance = current
+        target.setItems(list, for: item.kind)
+        updateInstance(target)
     }
 
-    func moveContentItems(kind: ContentKind, from source: IndexSet, to destination: Int) {
-        guard var current = activeInstance else { return }
-        var list = current.items(for: kind)
+    func moveContentItems(kind: ContentKind, from source: IndexSet, to destination: Int, in instanceID: String? = nil) {
+        let id = instanceID ?? activeInstance?.id
+        guard let id, var target = instance(for: id) else { return }
+        var list = target.items(for: kind)
         list.move(fromOffsets: source, toOffset: destination)
         for i in list.indices {
             list[i].order = i
         }
-        current.setItems(list, for: kind)
-        activeInstance = current
+        target.setItems(list, for: kind)
+        updateInstance(target)
     }
 
-    func deleteContentItems(kind: ContentKind, at offsets: IndexSet) {
-        guard var current = activeInstance else { return }
-        var list = current.items(for: kind)
+    func deleteContentItems(kind: ContentKind, at offsets: IndexSet, in instanceID: String? = nil) {
+        let id = instanceID ?? activeInstance?.id
+        guard let id, var target = instance(for: id) else { return }
+        var list = target.items(for: kind)
         for index in offsets {
             try? fs.removeContentItem(list[index])
         }
@@ -170,43 +350,34 @@ final class LauncherViewModel: ObservableObject {
         for i in list.indices {
             list[i].order = i
         }
-        current.setItems(list, for: kind)
-        activeInstance = current
+        target.setItems(list, for: kind)
+        updateInstance(target)
     }
 
-    func importLocalFiles(urls: [URL], kind: ContentKind) {
-        guard var current = activeInstance else { return }
+    func importLocalFiles(urls: [URL], kind: ContentKind, into instanceID: String? = nil) {
+        let id = instanceID ?? activeInstance?.id
+        guard let id, var target = instance(for: id) else { return }
         for url in urls {
             do {
-                let dest = try fs.importContent(from: url, into: current.id, kind: kind)
+                let dest = try fs.importContent(from: url, into: target.id, kind: kind)
                 appendLog(.info, "Импортирован \(kind.title.lowercased()): \(dest.lastPathComponent)")
             } catch {
                 lastErrorMessage = error.localizedDescription
                 appendLog(.error, "Ошибка импорта \(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
-        syncAllContent(for: &current)
-        activeInstance = current
-    }
-
-    func installFromModrinth(project: ModrinthProject, kind: ContentKind) async throws {
-        guard var current = activeInstance else { return }
-        appendLog(.info, "Загрузка '\(project.title)' с Modrinth...")
-        let downloaded = try await ModrinthClient.shared.downloadLatestFile(projectId: project.projectId)
-        let savedURL = try fs.saveDownloadedData(
-            downloaded.data,
-            fileName: downloaded.fileName,
-            instanceId: current.id,
-            kind: kind
-        )
-        syncAllContent(for: &current)
-        activeInstance = current
-        appendLog(.info, "Установлено в \(kind.folderName): \(savedURL.lastPathComponent)")
+        syncAllContent(for: &target)
+        updateInstance(target)
     }
 
     func saveSettings() {
         try? fs.saveGraphicsSettings(graphicsSettings)
         try? fs.saveProfile(profile)
+    }
+
+    func instanceSizeFormatted(for instanceId: String) -> String {
+        let bytes = fs.instanceSizeBytes(for: instanceId)
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     func buildLaunchPayload(for instance: GameInstance) -> RustLaunchConfigPayload {
@@ -216,6 +387,7 @@ final class LauncherViewModel: ObservableObject {
             instanceName: instance.name,
             minecraftVersion: instance.minecraftVersion,
             instanceRoot: rootPath,
+            gameFilesRoot: fs.gameFilesDirectoryURL.path,
             account: RustAccountPayload(
                 username: profile.username,
                 uuid: profile.uuid,
@@ -260,7 +432,17 @@ final class LauncherViewModel: ObservableObject {
         )
     }
 
-    func prepareAndOpenViewport() {
+    func prepareAndOpenViewport(for instanceID: String? = nil) {
+        if let instanceID {
+            selectedInstanceID = instanceID
+        }
+        refreshImportedGameFiles()
+
+        guard importedGameFiles.isImported else {
+            showMissingGameFilesAlert = true
+            return
+        }
+
         guard var current = activeInstance else { return }
         syncAllContent(for: &current)
         activeInstance = current
