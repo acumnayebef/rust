@@ -111,7 +111,7 @@ struct SkinsView: View {
                         isSkinImporterPresented = true
                     } label: {
                         Label("Добавить скин", systemImage: "plus")
-                            .font(.caption.semibold())
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(EternalPalette.textPrimary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
