@@ -1,0 +1,4 @@
+module MCRustCore {
+    header "mc_rust_core.h"
+    export *
+}

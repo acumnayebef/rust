@@ -1,0 +1,40 @@
+name: MCRustLauncher
+options:
+  bundleIdPrefix: com.mcrustedition
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    PRODUCT_BUNDLE_IDENTIFIER: com.mcrustedition.launcher
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SUPPORTS_MACCATALYST: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  MCRustLauncher:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Resources/Info.plist
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        ENABLE_BITCODE: "NO"
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Frameworks"
+    dependencies:
+      - framework: Frameworks/MCRustCore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: IOSurface.framework
+      - sdk: GameController.framework
+      - sdk: UniformTypeIdentifiers.framework

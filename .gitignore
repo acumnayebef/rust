@@ -1,0 +1,16 @@
+# Rust
+rust-core/target/
+**/*.rs.bk
+
+# Xcode / iOS
+ios-app/*.xcodeproj/
+ios-app/*.xcworkspace/
+ios-app/Frameworks/
+build/
+dist/
+*.ipa
+*.dSYM
+*.dSYM.zip
+DerivedData/
+xcuserdata/
+.DS_Store

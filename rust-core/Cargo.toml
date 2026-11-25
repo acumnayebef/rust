@@ -1,0 +1,23 @@
+[package]
+name = "mc_rust_core"
+version = "0.1.0"
+edition = "2021"
+description = "Universal C-FFI bridge for launching a custom Minecraft Rust Edition client on iOS"
+
+[lib]
+name = "mc_rust_core"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+wgpu = "=24.0.5"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+glam = "0.29"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
