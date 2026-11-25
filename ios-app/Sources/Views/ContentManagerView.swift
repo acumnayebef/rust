@@ -307,7 +307,7 @@ struct ContentManagerView: View {
         let isInstalling = viewModel.installingProjectIDs.contains(project.id)
 
         return HStack(spacing: 12) {
-            AsyncImage(url: project.icon.flatMap(URL.init(string:))) { phase in
+            AsyncImage(url: project.icon.flatMap { URL(string: $0) }) { phase in
                 if case .success(let image) = phase {
                     image
                         .resizable()

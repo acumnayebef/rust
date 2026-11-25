@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import SwiftUI
 
@@ -79,14 +80,15 @@ struct StarryHorizonBackdrop: View {
                 // Stepped voxel hills silhouette
                 Canvas { context, size in
                     let step = max(12.0, size.width / 46.0)
-                    let cols = Int(ceil(size.width / step)) + 1
+                    let cols = Int(Foundation.ceil(Double(size.width / step))) + 1
 
                     func drawLayer(baseY: CGFloat, amp: CGFloat, freq: CGFloat, phase: CGFloat, color: Color) {
                         var path = Path()
                         path.move(to: CGPoint(x: 0, y: size.height))
                         for i in 0..<cols {
                             let x = CGFloat(i) * step
-                            let rawY = baseY + sin(CGFloat(i) * freq + phase) * amp
+                            let angle = Double(CGFloat(i) * freq + phase)
+                            let rawY = baseY + CGFloat(Foundation.sin(angle)) * amp
                             let snappedY = (rawY / step).rounded() * step
                             path.addLine(to: CGPoint(x: x, y: snappedY))
                             path.addLine(to: CGPoint(x: x + step, y: snappedY))
